@@ -6,6 +6,7 @@ import { uploadOnCloudinary } from "../utils/cloudinary.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import jwt from "jsonwebtoken";
 import { trusted } from "mongoose";
+import userEvent from "@testing-library/user-event";
 
 const generateAccessAndRefreshToken = async (userId) => {
   try {
@@ -270,6 +271,202 @@ const updateAccountDetails = asyncHandler(async (req, res) => {
     .json(new ApiResponse(200, user, "Account details updated successfully"));
 });
 
+const updateUserAvatar = asyncHandler(async (req, res) => {
+  const avatarLocalPath = req.file?.path;
+
+  if (!avatarLocalPath) {
+    throw new ApiError(400, "Avatar file is missing");
+  }
+
+  const avatar = await uploadOnCloudinary(avatarLocalPath);
+
+  if (!avatar.url) {
+    throw new ApiError(400, "Error while uploading on avatar");
+  }
+
+  const user = await User.findByIdAndUpdate(
+    req.user?._id,
+    {
+      $set: {
+        avatar: avatar.url,
+      },
+    },
+    { new: true } //“After updating, give me the new version of the document (with the changes applied).”
+  ).select("-password");
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, user, "Avatar image updated successfully"));
+});
+
+const updateUserCoverImage = asyncHandler(async (req, res) => {
+  const coverImageLocalPath = req.file?.path;
+
+  if (!coverImageLocalPath) {
+    throw new ApiError(400, "Cover image file is missing");
+  }
+
+  const coverImage = await uploadOnCloudinary(coverImageLocalPath);
+
+  if (!coverImage.url) {
+    throw new ApiError(400, "Error while uploading on avatar");
+  }
+
+  const user = await User.findByIdAndUpdate(
+    req.user?._id,
+    {
+      $set: {
+        coverImage: coverImage.url,
+      },
+    },
+    { new: true }
+  ).select("-password");
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, user, "Cover image updated successfully"));
+});
+
+// aggregation pipeline
+
+const getUserChannelProfile = asyncHandler(async (req, res) => {
+  const { username } = req.params;
+
+  if (!username?.trim()) {
+    throw new ApiError(400, "Username is missing ");
+  }
+
+  // User.aggregate([{}, {}])  : aggregate array leta hai and uske ander {1st pipeline} ,{2nd pipeline}...
+  // $ -> field
+
+  const channel = await User.aggregate([
+    // 🧩 STEP 1: Find the user by username (converted to lowercase)
+    {
+      $match: {
+        username: username?.toLowerCase(),
+      },
+    },
+
+    // 🧩 STEP 2: Lookup all subscribers of this user (JOIN with subscriptions collection)
+    {
+      $lookup: {
+        from: "subscriptions", // collection to join with --- collection --
+        localField: "_id", // user’s _id
+        foreignField: "channel", // "channel" field in subscriptions collection
+        as: "subscribers", // name of the new array field to store result --- array return karta hai---
+      },
+    },
+
+    // 🧩 STEP 3: Lookup all channels that this user has subscribed to
+    {
+      $lookup: {
+        from: "subscriptions", // same collection again
+        localField: "_id", // user’s _id
+        foreignField: "subscriber", // "subscriber" field in subscriptions collection
+        as: "subscribedTo", // store result here
+      },
+    },
+
+    // 🧩 STEP 4: Add extra calculated fields
+    {
+      $addFields: {
+        // number of subscribers this user has (followers)
+        subscribersCount: { $size: "$subscribers" },
+
+        // number of channels this user has subscribed to (following)
+        channelsSubscribedToCount: { $size: "$subscribedTo" },
+
+        // check if the currently logged-in user is subscribed to this channel
+        isSubscribed: {
+          $cond: {
+            // if logged-in user's id is in the subscribers.subscriber array
+            if: { $in: [req.user?._id, "$subscribers.subscriber"] },
+            then: true, // return true if subscribed
+            else: false, // otherwise false
+          },
+        },
+      },
+    },
+
+    // 🧩 STEP 5: Select (project) only the fields we want to return
+    {
+      $project: {
+        fullName: 1, // include full name
+        username: 1, // include username
+        email: 1, // include email
+        avatar: 1, // include profile picture
+        coverImage: 1, // include cover image
+        subscribersCount: 1, // include followers count
+        channelsSubscribedToCount: 1, // include following count
+        isSubscribed: 1, // include whether logged-in user subscribed
+      },
+    },
+  ]);
+  if (!channel?.length) {
+    throw new ApiError(404, "channel does not exists");
+  }
+
+  return res
+    .status(200)
+    .json(
+      new ApiResponse(200, channel[0], "User channel fetched successfully")
+    );
+});
+
+const getWatchHistory = asyncHandler(async (req, res) => {
+  const user = await User.aggregate([
+    {
+      $match: {
+        _id: new mongoose.Types.ObjectId(req.user._id),
+      },
+    },
+    {
+      $lookup: {
+        from: "videos",
+        localField: "watchHistory",
+        foreignField: "_id",
+        as: "watchHistory",
+        pipeline: [
+          {
+            $lookup: {
+              from: "users",
+              localField: "owner",
+              foreignField: "_id",
+              as: "owner",
+              pipeline: [
+                {
+                  $project: {
+                    fullName: 1,
+                    username: 1,
+                    avatar: 1,
+                  },
+                },
+              ],
+            },
+          },
+          {
+            $addFields: {
+              owner: {
+                $first: "$owner",
+              },
+            },
+          },
+        ],
+      },
+    },
+  ]);
+
+  return res
+    .status(200)
+    .json(
+      new ApiResponse(
+        200,
+        user[0].watchHistory,
+        "Watch history fetched successfully"
+      )
+    );
+});
+
 export {
   registerUser,
   loginUser,
@@ -278,4 +475,8 @@ export {
   changeCurrentPassword,
   getCurrentUser,
   updateAccountDetails,
+  updateUserAvatar,
+  updateUserCoverImage,
+  getUserChannelProfile,
+  getWatchHistory,
 };
